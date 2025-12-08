@@ -10,92 +10,88 @@ except ModuleNotFoundError:
 from tanto.tanto_view import TantoView
 
 from binaryninja.enums import BranchType, InstructionTextTokenType
-from binaryninja import FlowGraph, FlowGraphNode, HighLevelILBlock, DisassemblyTextLine, InstructionTextToken
-
+from binaryninja import FlowGraph, FlowGraphNode, DisassemblyTextLine, InstructionTextToken
 
 # Inspired by https://github.com/withzombies/bnil-graph
+
 
 class InstructionGraph(tanto.slices.Slice):
   def __init__(self, parent: 'tanto.tanto_view.TantoView'):
     self.update_style = tanto.slices.UpdateStyle.ON_NAVIGATE
 
-  def traverser(self, expr, flowgraph, nodes):
-    if expr.expr_index not in nodes:
-      new_node = FlowGraphNode(flowgraph)
+  def __get_class_tokens__(self, name):
+    return [InstructionTextToken(InstructionTextTokenType.BeginMemoryOperandToken, "<"),
+            InstructionTextToken(InstructionTextTokenType.KeywordToken, "class"),
+            InstructionTextToken(InstructionTextTokenType.TextToken, ": "),
+            InstructionTextToken(InstructionTextTokenType.TypeNameToken, name),
+            InstructionTextToken(InstructionTextTokenType.EndMemoryOperandToken, ">")]
 
-      expr_list_index = None
-      for field_name, parent_expr, _ in expr.parent.detailed_operands:
-        if expr == parent_expr:
-          break
-        try:
-          expr_list_index = parent_expr.index(expr)
-          break
-        except:
-          pass
-      else:
-        field_name = None
+  def traverse(self, expr, flowgraph, parent_node, field_name):
+    new_node = FlowGraphNode(flowgraph)
+    new_node.lines = [DisassemblyTextLine(expr.tokens, expr.address, expr)]
 
-      new_node.lines = list(expr.lines)
-      if not isinstance(expr.parent, HighLevelILBlock):
-        if expr_list_index is not None:
-          new_node.lines = [DisassemblyTextLine([
-            InstructionTextToken(InstructionTextTokenType.OperationToken, "."),
-            InstructionTextToken(InstructionTextTokenType.FieldNameToken, field_name),
-            InstructionTextToken(InstructionTextTokenType.BeginMemoryOperandToken, "["),
-            InstructionTextToken(InstructionTextTokenType.FieldNameToken, f"0x{expr_list_index:x}", value=expr_list_index),
-            InstructionTextToken(InstructionTextTokenType.EndMemoryOperandToken, "]"),
-            InstructionTextToken(InstructionTextTokenType.TextToken, ": ")] + list(expr.lines)[0].tokens)] + list(expr.lines)[1:]
-        else:
-          new_node.lines = [DisassemblyTextLine([
-            InstructionTextToken(InstructionTextTokenType.OperationToken, "."),
-            InstructionTextToken(InstructionTextTokenType.FieldNameToken, field_name),
-            InstructionTextToken(InstructionTextTokenType.TextToken, ": ")] + list(expr.lines)[0].tokens)] + list(expr.lines)[1:]
+    # This sucks, would be nice to deprecate .lines now that we have line wrapping...
+    # this should effectively only be used by HLIL_WHILE and HLIL_DO_WHILE but no promises
+    if hasattr(expr, "lines") and len(lines := list(expr.lines)) > 1:
+      tokens = []
+      for line in lines:
+        for token in line.tokens:
+          tokens.append(token)
+        tokens.append(InstructionTextToken(InstructionTextTokenType.TextToken, "; "))
+      new_node.lines = [DisassemblyTextLine(tokens[:-1])]
+    if field_name is not None:
+      new_node.lines = [DisassemblyTextLine(field_name + [token for line in new_node.lines for token in line.tokens])]
 
-      new_node.lines += ["", DisassemblyTextLine([
-        InstructionTextToken(InstructionTextTokenType.BeginMemoryOperandToken, "<"),
-        InstructionTextToken(InstructionTextTokenType.KeywordToken, "class"),
-        InstructionTextToken(InstructionTextTokenType.TextToken, ": "),
-        InstructionTextToken(InstructionTextTokenType.TypeNameToken, f"{type(expr).__name__}"),
-        InstructionTextToken(InstructionTextTokenType.EndMemoryOperandToken, ">")])]
-      flowgraph.append(new_node)
-      nodes[expr.expr_index] = new_node
+    new_node.lines += ["", DisassemblyTextLine(self.__get_class_tokens__(f"{type(expr).__name__}"))]
 
-      # Get the things the traverser doesn't
-      blacklisted_expr_names = {'true', 'false', 'body', 'cases', 'default'}
-      for expr_name, hidden_expr, _ in expr.detailed_operands:
-        if expr_name in blacklisted_expr_names:
-          continue
-        if isinstance(hidden_expr, tanto.helpers.ILInstruction):
-          continue
-        elif isinstance(hidden_expr, list) and all(isinstance(hidden_sub_expr, tanto.helpers.ILInstruction) for hidden_sub_expr in hidden_expr):
-          continue
+    flowgraph.append(new_node)
+    if parent_node is not None:
+      parent_node.add_outgoing_edge(BranchType.UnconditionalBranch, new_node)
 
+    # Traverse manually
+    blacklisted_expr_names = {'true', 'false', 'body', 'cases', 'default'}
+    for expr_name, inner_expr, _ in expr.detailed_operands:
+      if expr_name in blacklisted_expr_names:
+        continue
+      if isinstance(inner_expr, tanto.helpers.ILInstruction):
+        self.traverse(inner_expr, flowgraph, new_node, [InstructionTextToken(InstructionTextTokenType.OperationToken, "."),
+                                                        InstructionTextToken(InstructionTextTokenType.FieldNameToken, expr_name),
+                                                        InstructionTextToken(InstructionTextTokenType.TextToken, ": ")])
+      elif isinstance(inner_expr, list) and all(isinstance(inner_sub_expr, tanto.helpers.ILInstruction) for inner_sub_expr in inner_expr):
+        for i, hidden_sub_expr in enumerate(inner_expr):
+          self.traverse(hidden_sub_expr, flowgraph, new_node, [InstructionTextToken(InstructionTextTokenType.OperationToken, "."),
+                                                               InstructionTextToken(InstructionTextTokenType.FieldNameToken, expr_name),
+                                                               InstructionTextToken(InstructionTextTokenType.BeginMemoryOperandToken, "["),
+                                                               InstructionTextToken(InstructionTextTokenType.FieldNameToken, f"0x{i:x}", value=i),
+                                                               InstructionTextToken(InstructionTextTokenType.EndMemoryOperandToken, "]"),
+                                                               InstructionTextToken(InstructionTextTokenType.TextToken, ": ")])
+      else:  # Get the things the traverser doesn't, the .var and .constants, etc that aren't ILInstructions
         hidden_expr_node = FlowGraphNode(flowgraph)
         hidden_expr_node.lines = [
           DisassemblyTextLine([
             InstructionTextToken(InstructionTextTokenType.OperationToken, "."),
             InstructionTextToken(InstructionTextTokenType.FieldNameToken, expr_name),
-            InstructionTextToken(InstructionTextTokenType.TextToken, ": "),
-            InstructionTextToken(InstructionTextTokenType.BeginMemoryOperandToken, "<"),
-            InstructionTextToken(InstructionTextTokenType.KeywordToken, "class"),
-            InstructionTextToken(InstructionTextTokenType.TextToken, ": "),
-            InstructionTextToken(InstructionTextTokenType.TypeNameToken, f"{type(hidden_expr).__name__}"),
-            InstructionTextToken(InstructionTextTokenType.EndMemoryOperandToken, ">")
-          ])
+            InstructionTextToken(InstructionTextTokenType.TextToken, ": ")] + self.__get_class_tokens__(f"{type(inner_expr).__name__}"))
         ]
         flowgraph.append(hidden_expr_node)
         new_node.add_outgoing_edge(BranchType.UnconditionalBranch, hidden_expr_node)
-    else:
-      new_node = nodes[expr.expr_index]
 
-    if isinstance(parent := expr.parent, tanto.helpers.ILInstruction) and parent.expr_index in nodes:
-      nodes[parent.expr_index].add_outgoing_edge(BranchType.UnconditionalBranch, nodes[expr.expr_index])
+      # Special cased fields we want to render:
+      if hasattr(expr, "string") and expr.string is not None:
+        special_expr_node = FlowGraphNode(flowgraph)
+        special_expr_node.lines = [
+          DisassemblyTextLine([
+            InstructionTextToken(InstructionTextTokenType.OperationToken, "."),
+            InstructionTextToken(InstructionTextTokenType.FieldNameToken, "string"),
+            InstructionTextToken(InstructionTextTokenType.TextToken, ": ")] + self.__get_class_tokens__("str"))
+        ]
+        flowgraph.append(special_expr_node)
+        new_node.add_outgoing_edge(BranchType.UnconditionalBranch, special_expr_node)
 
   def get_flowgraph(self) -> FlowGraph:
     if (expr := tanto.helpers.get_selected_expr()) is not None:
       flowgraph = FlowGraph()
-      for _ in expr.traverse(self.traverser, flowgraph, {}):
-        pass  # Yield all results from the generator. It was easier to add nodes in the recursion instead of pulling out chains and processing all that here
+      self.traverse(expr, flowgraph, None, None)
       return flowgraph
 
 

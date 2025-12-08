@@ -49,7 +49,7 @@ class FullDominatorTreeSlice(tanto.slices.Slice):
     if (function := tanto.helpers.get_current_il_function()) is None:
       return None
 
-    current_block = function[0].il_basic_block
+    current_block = function.basic_blocks[0]
     if current_block is None:
       return flowgraph
 
