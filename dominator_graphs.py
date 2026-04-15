@@ -5,6 +5,7 @@ except ModuleNotFoundError:
   from os import path
   from sys import path as python_path
   python_path.append(path.abspath(path.join(binaryninja.user_plugin_path(), '../repositories/official/plugins')))
+  python_path.append(path.abspath(path.join(binaryninja.user_plugin_path(), '../channels/official/plugins')))
   import tanto
 
 from tanto.tanto_view import TantoView
